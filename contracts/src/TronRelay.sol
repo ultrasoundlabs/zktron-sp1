@@ -11,7 +11,9 @@ contract TronRelay is ITronRelay, Ownable {
     bytes32 constant vkey = bytes32(0); // TODO: change
 
     uint256 public latestBlock;
-    mapping(uint256 => bytes32) public blocks;
+    uint256[] public timestamps;
+    mapping(uint256 => bytes32) public blocks; // block number -> block id
+    mapping(bytes32 => uint256) public blockTimestamps; // block id -> timestamp
 
     mapping(address => bool) internal srs;
     bytes32 internal srPrint;
@@ -70,10 +72,14 @@ contract TronRelay is ITronRelay, Ownable {
             latestBlock++;
             bytes32 blockId = Tronlib.getBlockId(blockHash, latestBlock);
             blocks[latestBlock] = blockId;
+
+            uint256 blockTimestamp = Tronlib.getBlockTimestamp(rawData);
+            blockTimestamps[blockId] = blockTimestamp;
+            timestamps.push(blockTimestamp);
         }
     }
 
-    function zkUpdate(bytes calldata proof, bytes calldata publicValues, bytes32[] calldata blockIds) external {
+    function zkUpdate(bytes calldata proof, bytes calldata publicValues, bytes32[] calldata blockIds, uint256[] calldata _blockTimestamps) external {
         verifier.verifyProof(vkey, publicValues, proof);
 
         LightClientOutput memory output = abi.decode(publicValues, (LightClientOutput));
@@ -84,6 +90,8 @@ contract TronRelay is ITronRelay, Ownable {
         for (uint256 i = 0; i < blockIds.length; i++) {
             bytes32 blockId = blockIds[i];
             blocks[Tronlib.blockIdToNumber(blockId)] = blockId;
+            blockTimestamps[blockId] = _blockTimestamps[i]; 
+            timestamps.push(_blockTimestamps[i]);
         }
         latestBlock += blockIds.length;
     }

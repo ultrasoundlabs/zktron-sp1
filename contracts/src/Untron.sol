@@ -44,7 +44,8 @@ contract Untron is Ownable {
     bytes32 public latestOrder;
     uint256 public totalOrders;
 
-    mapping(bytes32 => bool) public orderExists; // order chained hash -> bool
+    bytes32[] public orderChains; // order chain hashes in order
+    mapping(bytes32 => uint256) public orderTimestamps; // order chained hash -> timestamp
     mapping(address => Order) public orders; // tron address -> Order
     mapping(address => address) public tronAddresses; // tron address -> evm address
     mapping(address => Buyer) public buyers; // EVM address -> Buyer
@@ -136,11 +137,12 @@ contract Untron is Ownable {
             fulfilledAmount: 0
         });
 
+        uint256 orderTimestamp = Tronlib.unixToTron(block.timestamp);
         latestOrder = sha256(
             abi.encode(
                 OrderChain({
                     prev: latestOrder,
-                    timestamp: Tronlib.unixToTron(block.timestamp),
+                    timestamp: orderTimestamp,
                     tronAddress: tronAddress,
                     minDeposit: buyers[buyer].minDeposit
                 })
@@ -149,7 +151,8 @@ contract Untron is Ownable {
         totalOrders++;
 
         userActions[msg.sender].push(block.timestamp);
-        orderExists[latestOrder] = true;
+        orderTimestamps[latestOrder] = orderTimestamp;
+        orderChains.push(latestOrder);
         _isBusy[msg.sender] = false; // see: inverse flag "_isBusy"
     }
 
@@ -182,6 +185,7 @@ contract Untron is Ownable {
             bytes32 endBlock,
             bytes32 startOrder,
             bytes32 endOrder,
+            uint256 endOrderIndex,
             bytes32 oldStateHash,
             bytes32 newStateHash,
             bytes32 closedOrdersHash,
@@ -198,9 +202,24 @@ contract Untron is Ownable {
         require(params.relay.blocks(endBlockNumber) == endBlock);
         require(endBlockNumber < params.relay.latestBlock() - 18);
         require(startOrder == latestKnownOrder);
-        require(orderExists[endOrder]);
         require(oldStateHash == stateHash);
         require(_feePerBlock == params.feePerBlock);
+
+        bytes32 storedEndOrder = orderChains[endOrderIndex];
+        require(storedEndOrder == endOrder);
+
+        uint256 endOrderTimestamp = orderTimestamps[endOrder];
+        uint256 endBlockTimestamp = params.relay.blockTimestamps(endBlock);
+        uint256[] storage blockTimestamps = params.relay.timestamps();
+
+        uint256 closestTimestamp = findUpperBound(blockTimestamps, endOrderTimestamp);
+        require(closestTimestamp == endBlockTimestamp);
+
+        bytes32 nextOrder = orderChains[endOrderIndex + 1];
+        if (nextOrder != bytes32(0)) {
+            uint256 closestNextOrderTimestamp = findUpperBound(blockTimestamps, endOrderTimestamp);
+            require(closestNextOrderTimestamp > endBlockTimestamp);
+        }
 
         stateHash = newStateHash;
         latestKnownOrder = endOrder;
@@ -235,5 +254,43 @@ contract Untron is Ownable {
     function jailbreak() external {
         require(params.relay.latestBlock() > Tronlib.blockIdToNumber(latestKnownBlock) + 600); // 30 minutes
         params.relayer = address(0);
+    }
+
+    // Taken from https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v5.0.2/contracts/utils/Arrays.sol
+    /**
+     * @dev Searches a sorted `array` and returns the first index that contains
+     * a value greater or equal to `element`. If no such index exists (i.e. all
+     * values in the array are strictly less than `element`), the array length is
+     * returned. Time complexity O(log n).
+     *
+     * `array` is expected to be sorted in ascending order, and to contain no
+     * repeated elements.
+     */
+    function findUpperBound(uint256[] storage array, uint256 element) internal view returns (uint256) {
+        uint256 low = 0;
+        uint256 high = array.length;
+
+        if (high == 0) {
+            return 0;
+        }
+
+        while (low < high) {
+            uint256 mid = Math.average(low, high);
+
+            // Note that mid will always be strictly less than high (i.e. it will be a valid array index)
+            // because Math.average rounds towards zero (it does integer division with truncation).
+            if (unsafeAccess(array, mid).value > element) {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+
+        // At this point `low` is the exclusive upper bound. We will return the inclusive upper bound.
+        if (low > 0 && unsafeAccess(array, low - 1).value == element) {
+            return low - 1;
+        } else {
+            return low;
+        }
     }
 }
